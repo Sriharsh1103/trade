@@ -1,0 +1,49 @@
+# Trading mode: demo | live
+mode: demo
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+# Default symbol for demo trading
+trading:
+  default_symbol: "EURUSD"
+  lot_size: 0.01
+  max_slippage_pips: 3
+
+risk:
+  # Target profit as % of position margin (aggressive — see README caveats)
+  profit_target_pct: 10.0
+  # Max loss per trade as % of account equity
+  max_loss_pct: 2.0
+  # Stop trading if daily loss exceeds this % of starting daily balance
+  daily_loss_limit_pct: 5.0
+  # Maximum concurrent open positions
+  max_open_positions: 3
+  # Auto-exit if unrealized loss exceeds this % of position margin
+  auto_exit_loss_pct: 5.0
+  # Minimum margin level % before blocking new trades
+  min_margin_level_pct: 200.0
+  # Force close all if margin level drops below this
+  emergency_margin_level_pct: 100.0
+
+demo:
+  initial_balance: 10000.0
+  leverage: 100
+  spread_pips: 1.5
+
+broker:
+  # MT5 REST bridge URL (set when bridge container is running)
+  mt5_bridge_url: "http://localhost:8000"
+  api_token: ""
+  account_id: 0
+  # Exness server names (examples — verify in terminal)
+  demo_server: "Exness-MT5Trial"
+  live_server: "Exness-MT5Real"
+
+monitor:
+  # Position check interval in milliseconds
+  interval_ms: 500
+
+logging:
+  level: "info"

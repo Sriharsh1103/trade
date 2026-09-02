@@ -1,0 +1,40 @@
+# MT5 Bridge + Trading Core
+#
+# Start this when Exness credentials are available.
+# The MT5 bridge container runs MetaTrader 5 under Wine with a REST API.
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in credentials
+#   2. docker compose -f docker/docker-compose.yml up -d
+#   3. Register account via bridge API
+#   4. Set broker.account_id in config/config.yaml
+#   5. Change mode: live in config (only after demo validation)
+
+services:
+  # MT5 bridge — uncomment and configure when credentials are ready
+  # mt5-bridge:
+  #   image: ghcr.io/essamamdani/xm-exness-mt5-linux:latest
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     - API_TOKEN=${MT5_API_TOKEN}
+  #   volumes:
+  #     - mt5-data:/data
+  #   restart: unless-stopped
+
+  trader:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../config:/app/config:ro
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    # depends_on:
+    #   - mt5-bridge
+
+# volumes:
+#   mt5-data:

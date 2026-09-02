@@ -1,0 +1,44 @@
+# Binaries
+/backend/trader
+/backend/bin/
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+/backend/vendor/
+
+# Python
+/strategy/.venv/
+/strategy/__pycache__/
+/strategy/**/__pycache__/
+/strategy/*.egg-info/
+/strategy/.pytest_cache/
+*.pyc
+
+# Config & secrets (never commit credentials)
+config/config.yaml
+config/credentials.yaml
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & data
+/logs/
+/data/
+*.log
+
+# Docker volumes
+/docker/volumes/
