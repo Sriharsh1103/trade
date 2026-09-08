@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# DEPRECATED — superseded by scripts/run_auto.sh, which uses this same
+# Bollinger+RSI strategy (gold_pro_strategy.py) but through auto_trader.py's
+# unified regime-detection loop and the global trading control gate. Kept
+# for reference/manual backtesting. See docs/REMEDIATION_PLAN.md.
+#
 # Start Bollinger+RSI pro gold strategy (demo)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

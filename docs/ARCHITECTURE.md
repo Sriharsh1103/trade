@@ -156,16 +156,46 @@ All settings in `config/config.yaml` (from `config.example.yaml`):
 - MT5 bridge uses bearer token auth
 - No credentials in code or committed config
 - Live mode requires explicit config flag + confirmation
+- The trading API itself requires `server.api_token` as a
+  `Authorization: Bearer <token>` header on every route except `/health`
+  (set in `config/config.yaml`; the server logs a loud warning at startup if
+  it's unset). Binds to `127.0.0.1` by default — set `server.host`
+  explicitly to expose it beyond localhost, and always set a token if you do.
+
+## Trading Control Gate
+
+A single, persisted, global switch gates every order-placing path (Go
+`PlaceOrder`/`ProcessSignal`, the Python mirror in
+`strategy/exness_executor.py`) — trading starts **disabled** on a fresh state
+file and stays that way until explicitly enabled. State is persisted to
+`data/trading_state.json` (path configurable via `control.state_path`) so a
+restart never silently re-enables trading.
+
+```
+GET  /api/v1/control/status     — {enabled, reason, changed_at, changed_by}
+POST /api/v1/control/enable     — {reason?, by?}
+POST /api/v1/control/disable    — {reason?, by?}
+POST /api/v1/control/stop-all   — disable + best-effort close every open position
+```
+
+This gate does not reach the alternate execution paths (`exness_web_bot.py
+--loop`, the MT5 Expert Advisor) — see `docs/NO_API_OPTIONS.md` for how to
+stop those manually.
 
 ## API Endpoints (Phase 1)
 
 ```
-GET  /health                    — service health
+GET  /health                    — service health (no auth)
 GET  /api/v1/account            — account summary
 GET  /api/v1/positions          — open positions
 GET  /api/v1/orders             — pending orders
-POST /api/v1/orders             — place order (through risk engine)
+POST /api/v1/orders             — place order (through risk engine + control gate)
 DELETE /api/v1/positions/{id}   — close position
-POST /api/v1/signals            — strategy signal intake
+POST /api/v1/signals            — strategy signal intake (through control gate)
 GET  /api/v1/risk/status        — risk engine state
+POST /api/v1/risk/reset         — reset daily P&L (demo mode only)
+GET  /api/v1/control/status     — trading control gate state
+POST /api/v1/control/enable     — enable trading
+POST /api/v1/control/disable    — disable trading
+POST /api/v1/control/stop-all   — disable + close all positions
 ```

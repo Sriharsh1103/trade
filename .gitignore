@@ -21,6 +21,7 @@
 # Config & secrets (never commit credentials)
 config/config.yaml
 config/credentials.yaml
+docker/.env
 .env
 .env.*
 !.env.example

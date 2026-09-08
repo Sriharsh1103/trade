@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# DEPRECATED — superseded by scripts/run_auto.sh (Go engine + auto_trader.py's
+# unified regime-detection strategy, with the global trading control gate).
+# Kept for reference; not part of the primary supported path. See
+# docs/REMEDIATION_PLAN.md.
+#
 # Continuous analysis + trading loop for XAUUSD demo
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

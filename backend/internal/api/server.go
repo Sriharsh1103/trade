@@ -33,11 +33,33 @@ func NewServer(cfg *config.Config, engine *trading.Engine, demoEngine *demo.Engi
 		mux:     http.NewServeMux(),
 	}
 	s.routes()
+	if s.cfg.Server.APIToken == "" {
+		s.logger.Warn("server.api_token is not set — every endpoint except /health is unauthenticated; do not expose this port beyond localhost")
+	}
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.withAuth(s.mux)
+}
+
+// withAuth requires "Authorization: Bearer <server.api_token>" on every route
+// except the health check. If no token is configured, auth is skipped (local
+// dev only — NewServer already logs a warning in that case).
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.Server.APIToken == "" || r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		want := "Bearer " + s.cfg.Server.APIToken
+		if auth == "" || auth != want {
+			writeError(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) routes() {
@@ -54,6 +76,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/broker/status", s.handleBrokerStatus)
 	s.mux.HandleFunc("POST /api/v1/broker/browser/enable", s.handleBrowserEnable)
 	s.mux.HandleFunc("POST /api/v1/broker/browser/sync", s.handleBrowserSync)
+	s.mux.HandleFunc("GET /api/v1/control/status", s.handleControlStatus)
+	s.mux.HandleFunc("POST /api/v1/control/enable", s.handleControlEnable)
+	s.mux.HandleFunc("POST /api/v1/control/disable", s.handleControlDisable)
+	s.mux.HandleFunc("POST /api/v1/control/stop-all", s.handleControlStopAll)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +248,66 @@ func (s *Server) handleBrowserSync(w http.ResponseWriter, r *http.Request) {
 			"symbol", symbol, "bid", body.Bid, "ask", body.Ask, "balance", body.Balance)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "synced"})
+}
+
+func (s *Server) handleControlStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.Control().Status())
+}
+
+func (s *Server) handleControlEnable(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+		By     string `json:"by"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.By == "" {
+		body.By = "api"
+	}
+	state := s.engine.Control().Enable(body.By, body.Reason)
+	s.logger.Info("trading enabled", "by", state.ChangedBy, "reason", state.Reason)
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) handleControlDisable(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+		By     string `json:"by"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.By == "" {
+		body.By = "api"
+	}
+	state := s.engine.Control().Disable(body.By, body.Reason)
+	s.logger.Info("trading disabled", "by", state.ChangedBy, "reason", state.Reason)
+	writeJSON(w, http.StatusOK, state)
+}
+
+// handleControlStopAll is the emergency kill switch: disable new orders and
+// best-effort close every open position, regardless of the current gate state.
+func (s *Server) handleControlStopAll(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+		By     string `json:"by"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.By == "" {
+		body.By = "api"
+	}
+	if body.Reason == "" {
+		body.Reason = "stop-all"
+	}
+	state := s.engine.Control().Disable(body.By, body.Reason)
+	s.logger.Warn("STOP-ALL triggered", "by", state.ChangedBy, "reason", state.Reason)
+
+	closed, closeErr := s.engine.CloseAllPositions(r.Context(), models.CloseReasonManual)
+	resp := map[string]any{
+		"control":        state,
+		"closed_trades":  closed,
+	}
+	if closeErr != nil {
+		resp["close_error"] = closeErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

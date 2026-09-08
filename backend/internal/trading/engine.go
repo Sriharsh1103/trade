@@ -6,6 +6,7 @@ import (
 
 	"github.com/prashant-sriharsh/trade/internal/broker"
 	"github.com/prashant-sriharsh/trade/internal/config"
+	"github.com/prashant-sriharsh/trade/internal/control"
 	"github.com/prashant-sriharsh/trade/internal/forex"
 	"github.com/prashant-sriharsh/trade/internal/models"
 	"github.com/prashant-sriharsh/trade/internal/risk"
@@ -13,13 +14,14 @@ import (
 
 // Engine orchestrates order execution with risk checks across demo or live brokers.
 type Engine struct {
-	cfg    *config.Config
-	broker broker.Client
-	risk   *risk.Manager
+	cfg     *config.Config
+	broker  broker.Client
+	risk    *risk.Manager
+	control *control.Gate
 }
 
-func NewEngine(cfg *config.Config, b broker.Client, riskMgr *risk.Manager) *Engine {
-	return &Engine{cfg: cfg, broker: b, risk: riskMgr}
+func NewEngine(cfg *config.Config, b broker.Client, riskMgr *risk.Manager, controlGate *control.Gate) *Engine {
+	return &Engine{cfg: cfg, broker: b, risk: riskMgr, control: controlGate}
 }
 
 func (e *Engine) Broker() broker.Client {
@@ -28,6 +30,10 @@ func (e *Engine) Broker() broker.Client {
 
 func (e *Engine) Risk() *risk.Manager {
 	return e.risk
+}
+
+func (e *Engine) Control() *control.Gate {
+	return e.control
 }
 
 func (e *Engine) GetAccount(ctx context.Context) (models.Account, error) {
@@ -53,6 +59,10 @@ func (e *Engine) ListOrders(ctx context.Context) ([]models.Order, error) {
 }
 
 func (e *Engine) PlaceOrder(ctx context.Context, req models.OrderRequest) (models.Order, error) {
+	if e.control != nil && !e.control.IsEnabled() {
+		return models.Order{}, fmt.Errorf("trading disabled: %s", e.control.Status().Reason)
+	}
+
 	account, err := e.GetAccount(ctx)
 	if err != nil {
 		return models.Order{}, err
@@ -112,6 +122,10 @@ func (e *Engine) PlaceOrder(ctx context.Context, req models.OrderRequest) (model
 }
 
 func (e *Engine) ProcessSignal(ctx context.Context, signal models.Signal) (models.Order, error) {
+	if e.control != nil && !e.control.IsEnabled() {
+		return models.Order{}, fmt.Errorf("trading disabled: %s", e.control.Status().Reason)
+	}
+
 	account, err := e.GetAccount(ctx)
 	if err != nil {
 		return models.Order{}, err
@@ -158,6 +172,33 @@ func (e *Engine) ClosePosition(ctx context.Context, positionID string, reason mo
 	trade.Reason = reason
 	e.risk.RecordClosedTrade(trade)
 	return trade, nil
+}
+
+// CloseAllPositions closes every open position with the given reason. It keeps
+// going after an individual failure and returns whichever trades succeeded
+// plus an error listing how many failed, so callers (emergency margin close,
+// the stop-all control endpoint) get a best-effort sweep rather than an
+// all-or-nothing operation.
+func (e *Engine) CloseAllPositions(ctx context.Context, reason models.CloseReason) ([]models.ClosedTrade, error) {
+	positions, err := e.ListPositions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	closed := make([]models.ClosedTrade, 0, len(positions))
+	failed := 0
+	for _, pos := range positions {
+		trade, err := e.ClosePosition(ctx, pos.ID, reason)
+		if err != nil {
+			failed++
+			continue
+		}
+		closed = append(closed, trade)
+	}
+	if failed > 0 {
+		return closed, fmt.Errorf("%d of %d positions failed to close", failed, len(positions))
+	}
+	return closed, nil
 }
 
 func (e *Engine) RiskStatus(ctx context.Context) (models.RiskStatus, error) {

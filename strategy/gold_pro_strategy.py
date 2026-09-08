@@ -37,6 +37,31 @@ SYMBOL = "XAUUSD"
 LOT_SIZE = 0.01
 STRATEGY_NAME = "bollinger_rsi_mean_reversion"
 DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "gold_trades.jsonl"
+CONFIG_FILE = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+
+_api_token_cache: str | None = None
+
+
+def go_api_token() -> str:
+    """Read server.api_token from config/config.yaml (cached).
+
+    The Go API requires this as a Bearer token on every route but /health once
+    it's set. Empty by default (matches the Go side's local-dev-only fallback).
+    """
+    global _api_token_cache
+    if _api_token_cache is not None:
+        return _api_token_cache
+    token = ""
+    try:
+        import yaml
+
+        if CONFIG_FILE.exists():
+            data = yaml.safe_load(CONFIG_FILE.read_text()) or {}
+            token = str((data.get("server") or {}).get("api_token") or "")
+    except Exception:
+        token = ""
+    _api_token_cache = token
+    return token
 
 
 @dataclass
@@ -84,12 +109,11 @@ class TradeRecord:
 
 def http_json(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | list[Any]:
     data = json.dumps(payload).encode() if payload else None
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"} if data else {},
-        method=method,
-    )
+    headers = {"Content-Type": "application/json"} if data else {}
+    token = go_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode())
 
@@ -134,8 +158,22 @@ def append_trade(record: TradeRecord) -> None:
     log.info("Logged to %s", DATA_FILE)
 
 
-def calc_sl_tp(action: str, entry: float, equity: float, lot: float, leverage: int = 2000) -> tuple[float, float]:
-    """Match Go risk manager: 2% max loss, 10% margin TP."""
+DEFAULT_LEVERAGE = 100  # must match config/config.yaml demo.leverage
+
+
+def calc_sl_tp(action: str, entry: float, equity: float, lot: float, leverage: int = DEFAULT_LEVERAGE) -> tuple[float, float]:
+    """Match Go risk manager: 2% max loss, 10% margin TP.
+
+    Caution: this ties SL *distance* directly to a fixed dollar amount
+    (equity * max_loss_pct), independent of the instrument's actual
+    volatility. On a small account this produces stops far tighter than
+    gold's real hourly movement — a real backtest against 2 years of hourly
+    data showed a 2.7% win rate and -84% return, with the vast majority of
+    trades stopped out within the same hour regardless of direction. Prefer
+    calc_sl_tp_atr() + size_lot_for_risk() for anything meant to actually
+    trade; this is kept for the deprecated standalone scripts
+    (run_pro_strategy.sh / run_continuous.sh) that still call it directly.
+    """
     max_loss = equity * 0.02
     margin = entry * lot * 100 / leverage
     target_profit = margin * 0.10
@@ -144,6 +182,59 @@ def calc_sl_tp(action: str, entry: float, equity: float, lot: float, leverage: i
     if action == "buy":
         return entry - sl_dist, entry + tp_dist
     return entry + sl_dist, entry - tp_dist
+
+
+def atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float:
+    """Average True Range — the instrument's actual recent volatility per bar."""
+    n = len(closes)
+    if n < 2:
+        return 0.0
+    trs: list[float] = []
+    for i in range(1, n):
+        h, l, c_prev = highs[i], lows[i], closes[i - 1]
+        trs.append(max(h - l, abs(h - c_prev), abs(l - c_prev)))
+    window = trs[-period:] if len(trs) >= period else trs
+    return _mean(window) if window else 0.0
+
+
+def calc_sl_tp_atr(
+    action: str,
+    entry: float,
+    atr_value: float,
+    sl_atr_mult: float = 1.5,
+    tp_atr_mult: float = 2.5,
+    min_dist: float = 0.30,
+) -> tuple[float, float]:
+    """Volatility-based SL/TP: stop/target distance scales with the
+    instrument's actual recent movement (ATR) instead of a fixed dollar
+    amount, so stops stay wider than normal market noise. min_dist is a
+    floor for when ATR is unavailable/near-zero (e.g. warming up)."""
+    sl_dist = max(atr_value * sl_atr_mult, min_dist)
+    tp_dist = max(atr_value * tp_atr_mult, min_dist * (tp_atr_mult / sl_atr_mult))
+    if action == "buy":
+        return entry - sl_dist, entry + tp_dist
+    return entry + sl_dist, entry - tp_dist
+
+
+def size_lot_for_risk(
+    sl_dist: float,
+    equity: float,
+    max_loss_pct: float,
+    min_lot: float = 0.01,
+    max_lot: float = 1.0,
+    lot_step: float = 0.01,
+) -> float:
+    """Pick the lot size so a stop-out costs at most max_loss_pct of equity,
+    given an ATR-sized (not artificially shrunk) stop distance. Floors at
+    min_lot — the broker's minimum — even if that exceeds the risk budget;
+    callers should treat that case as "risk budget too small for this
+    instrument at any lot size" rather than shrinking the stop instead."""
+    max_loss = equity * max_loss_pct / 100
+    if sl_dist <= 0:
+        return min_lot
+    lot = max_loss / (sl_dist * 100)
+    lot = round(lot / lot_step) * lot_step
+    return max(min_lot, min(max_lot, lot))
 
 
 # ── Indicators (pure Python — no external deps) ───────────────────────────────
@@ -433,7 +524,8 @@ def run_once(cfg: ProConfig, strategy: BollingerRSIStrategy) -> bool:
         return False
 
     entry = ask if action == "buy" else bid
-    sl, tp = calc_sl_tp(action, entry, float(account.get("equity", 28.54)), cfg.lot_size)
+    leverage = int(account.get("leverage") or DEFAULT_LEVERAGE)
+    sl, tp = calc_sl_tp(action, entry, float(account.get("equity", 28.54)), cfg.lot_size, leverage)
 
     order = send_signal(cfg, action, confidence)
     browser_result = mirror_to_browser(cfg, action, sl, tp)

@@ -13,6 +13,7 @@ import (
 	"github.com/prashant-sriharsh/trade/internal/api"
 	"github.com/prashant-sriharsh/trade/internal/broker"
 	"github.com/prashant-sriharsh/trade/internal/config"
+	"github.com/prashant-sriharsh/trade/internal/control"
 	"github.com/prashant-sriharsh/trade/internal/demo"
 	"github.com/prashant-sriharsh/trade/internal/monitor"
 	"github.com/prashant-sriharsh/trade/internal/risk"
@@ -55,7 +56,11 @@ func main() {
 		// Fresh demo session — don't carry phantom sim losses from prior runs
 		riskMgr.ResetDaily(initialBalance)
 	}
-	engine := trading.NewEngine(cfg, brokerClient, riskMgr)
+
+	controlGate := control.New(cfg.Control.StatePath)
+	logger.Info("trading control gate", "enabled", controlGate.IsEnabled(), "reason", controlGate.Status().Reason)
+
+	engine := trading.NewEngine(cfg, brokerClient, riskMgr, controlGate)
 
 	posMonitor := monitor.New(cfg, engine, demoEngine, logger)
 	ctx, cancel := context.WithCancel(context.Background())

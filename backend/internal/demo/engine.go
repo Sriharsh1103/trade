@@ -23,11 +23,17 @@ type Engine struct {
 	trades    []models.ClosedTrade
 	// Simple synthetic price per symbol (mid price)
 	prices map[string]float64
-	// Live Exness quote synced via browser bridge (disables random walk while fresh)
-	externalQuote   bool
-	externalBid     float64
-	externalAsk     float64
-	externalSyncAt  time.Time
+	// Live Exness quotes synced via browser bridge, keyed by symbol (disables
+	// that symbol's random walk while fresh). Must stay per-symbol — a single
+	// shared quote previously leaked one symbol's price onto every other
+	// symbol's GetQuote/Tick.
+	externalQuotes map[string]externalQuote
+}
+
+type externalQuote struct {
+	bid    float64
+	ask    float64
+	syncAt time.Time
 }
 
 func NewEngine(cfg *config.Config) *Engine {
@@ -38,10 +44,11 @@ func NewEngine(cfg *config.Config) *Engine {
 		defaultPrice = 4308.0
 	}
 	return &Engine{
-		cfg:       cfg,
-		balance:   initial,
-		positions: make(map[string]*models.Position),
-		prices:    map[string]float64{symbol: defaultPrice},
+		cfg:            cfg,
+		balance:        initial,
+		positions:      make(map[string]*models.Position),
+		prices:         map[string]float64{symbol: defaultPrice},
+		externalQuotes: make(map[string]externalQuote),
 	}
 }
 
@@ -91,10 +98,7 @@ func (e *Engine) SyncQuote(symbol string, bid, ask, balance, equity float64) {
 	}
 	if bid > 0 && ask > 0 {
 		e.prices[symbol] = (bid + ask) / 2
-		e.externalBid = bid
-		e.externalAsk = ask
-		e.externalQuote = true
-		e.externalSyncAt = time.Now().UTC()
+		e.externalQuotes[symbol] = externalQuote{bid: bid, ask: ask, syncAt: time.Now().UTC()}
 	}
 	if balance > 0 {
 		e.balance = balance
@@ -115,10 +119,11 @@ func (e *Engine) SyncQuote(symbol string, bid, ask, balance, equity float64) {
 	}
 }
 
-func (e *Engine) HasFreshExternalQuote(maxAge time.Duration) bool {
+func (e *Engine) HasFreshExternalQuote(symbol string, maxAge time.Duration) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.externalQuote && time.Since(e.externalSyncAt) <= maxAge
+	q, ok := e.externalQuotes[symbol]
+	return ok && time.Since(q.syncAt) <= maxAge
 }
 
 func (e *Engine) PlaceOrder(ctx context.Context, req models.OrderRequest) (models.Order, error) {
@@ -226,7 +231,7 @@ func (e *Engine) Tick(symbol string, deltaPips float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.externalQuote && time.Since(e.externalSyncAt) <= 30*time.Second {
+	if q, ok := e.externalQuotes[symbol]; ok && time.Since(q.syncAt) <= 30*time.Second {
 		return
 	}
 
@@ -287,13 +292,13 @@ func (e *Engine) getQuoteLocked(symbol string) models.Quote {
 		mid = 1.1000
 		e.prices[symbol] = mid
 	}
-	if e.externalQuote && time.Since(e.externalSyncAt) <= 30*time.Second && e.externalBid > 0 && e.externalAsk > 0 {
+	if q, ok := e.externalQuotes[symbol]; ok && time.Since(q.syncAt) <= 30*time.Second && q.bid > 0 && q.ask > 0 {
 		return models.Quote{
 			Symbol: symbol,
-			Bid:    e.externalBid,
-			Ask:    e.externalAsk,
-			Spread: e.externalAsk - e.externalBid,
-			Time:   e.externalSyncAt,
+			Bid:    q.bid,
+			Ask:    q.ask,
+			Spread: q.ask - q.bid,
+			Time:   q.syncAt,
 		}
 	}
 	spread := forex.PipSize(symbol) * e.cfg.Demo.SpreadPips

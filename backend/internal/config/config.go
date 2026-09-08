@@ -16,11 +16,24 @@ type Config struct {
 	Broker   BrokerConfig   `yaml:"broker"`
 	Monitor  MonitorConfig  `yaml:"monitor"`
 	Logging  LoggingConfig  `yaml:"logging"`
+	Control  ControlConfig  `yaml:"control"`
 }
 
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
+	// APIToken, when set, is required as a "Bearer <token>" Authorization header
+	// on every endpoint except GET /health. Leave empty only for trusted local
+	// dev use — the server logs a loud warning at startup if it's unset.
+	APIToken string `yaml:"api_token"`
+}
+
+// ControlConfig configures the global trading enable/disable gate.
+type ControlConfig struct {
+	// StatePath is where the gate's enabled/disabled state is persisted so a
+	// restart never silently re-enables trading. Relative paths resolve
+	// against the process's working directory (repo root, by convention).
+	StatePath string `yaml:"state_path"`
 }
 
 type TradingConfig struct {
@@ -78,10 +91,16 @@ func Load(path string) (*Config, error) {
 
 func (c *Config) applyDefaults() {
 	if c.Server.Host == "" {
-		c.Server.Host = "0.0.0.0"
+		// Local-only by default — an unauthenticated or open-bind API can place
+		// real orders. Set server.host explicitly (and server.api_token) to
+		// expose it beyond localhost.
+		c.Server.Host = "127.0.0.1"
 	}
 	if c.Server.Port == 0 {
 		c.Server.Port = 8080
+	}
+	if c.Control.StatePath == "" {
+		c.Control.StatePath = "data/trading_state.json"
 	}
 	if c.Mode == "" {
 		c.Mode = "demo"

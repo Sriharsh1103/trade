@@ -4,6 +4,16 @@ mode: demo
 server:
   host: "0.0.0.0"
   port: 8080
+  # Set this to require "Authorization: Bearer <token>" on every route except
+  # /health. Strongly recommended whenever host is not 127.0.0.1 — the API can
+  # place real orders. Generate one with: python3 -c "import secrets; print(secrets.token_hex(24))"
+  api_token: ""
+
+# Global trading enable/disable gate. Trading starts DISABLED until you
+# explicitly call POST /api/v1/control/enable — a fresh/deleted state file
+# always defaults to disabled, by design.
+control:
+  state_path: "data/trading_state.json"
 
 # Default symbol for demo trading
 trading:

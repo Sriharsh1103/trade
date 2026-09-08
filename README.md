@@ -11,6 +11,9 @@ This repository contains architecture, documentation, and a **Go backend scaffol
 ```bash
 # Copy and edit config (no credentials committed)
 cp config/config.example.yaml config/config.yaml
+# Set server.api_token in config.yaml — required for the API to accept requests
+# once you bind it beyond 127.0.0.1. Generate one:
+python3 -c "import secrets; print(secrets.token_hex(24))"
 
 # Build backend
 cd backend && go build -o ../bin/trader ./cmd/trader
@@ -18,6 +21,22 @@ cd backend && go build -o ../bin/trader ./cmd/trader
 # Run in demo mode
 ./bin/trader --config ../config/config.yaml
 ```
+
+Trading is **disabled by default** — a global control gate blocks every
+order-placing path until you explicitly enable it:
+
+```bash
+curl -X POST -H "Authorization: Bearer <server.api_token>" \
+  http://localhost:8080/api/v1/control/enable -d '{"reason":"manual start"}'
+
+# Stop everything at any time (disables + closes all open positions):
+curl -X POST -H "Authorization: Bearer <server.api_token>" \
+  http://localhost:8080/api/v1/control/stop-all -d '{"reason":"manual stop"}'
+```
+
+See `docs/ARCHITECTURE.md#trading-control-gate` for details, and
+`docs/REMEDIATION_PLAN.md` for the full list of issues found and fixed in
+this pass.
 
 ## Architecture Overview
 

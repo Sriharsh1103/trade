@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# DEPRECATED — an earlier momentum strategy, superseded by scripts/run_auto.sh.
+# Not connected to the global trading control gate. Kept for reference. See
+# docs/REMEDIATION_PLAN.md.
+#
 # Start continuous gold demo trading loop
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

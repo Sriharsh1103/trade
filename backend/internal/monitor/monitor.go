@@ -104,13 +104,7 @@ func (m *Monitor) tick(ctx context.Context, symbol string) {
 }
 
 func (m *Monitor) closeAll(ctx context.Context, reason models.CloseReason) {
-	positions, err := m.engine.ListPositions(ctx)
-	if err != nil {
-		return
-	}
-	for _, pos := range positions {
-		if _, err := m.engine.ClosePosition(ctx, pos.ID, reason); err != nil {
-			m.logger.Warn("monitor: emergency close", "id", pos.ID, "err", err)
-		}
+	if _, err := m.engine.CloseAllPositions(ctx, reason); err != nil {
+		m.logger.Warn("monitor: emergency close", "err", err)
 	}
 }

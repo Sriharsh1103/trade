@@ -33,12 +33,14 @@ from gold_pro_strategy import (
     ProConfig,
     adx,
     append_trade,
-    calc_sl_tp,
+    atr,
+    calc_sl_tp_atr,
     fetch_account,
     fetch_quote,
     http_json,
     rsi,
     send_signal,
+    size_lot_for_risk,
     TradeRecord,
 )
 from history_data import fetch_gold_bars, live_gold_quote
@@ -68,10 +70,17 @@ class AutoConfig:
     bridge_url: str = BRIDGE
     poll_seconds: float = 5.0
     min_confidence: float = 0.58
-    lot_size: float = 0.01
     ema_fast: int = 9
     ema_slow: int = 21
     adx_trend_threshold: float = 25.0
+    trade_cooldown_sec: float = 120.0  # min gap between trades
+    mirror_exness: bool = True
+    last_trade_at: float = 0.0
+    max_loss_pct: float = 2.0  # risk budget per trade, as % of equity — matches config.yaml risk.max_loss_pct
+    sl_atr_mult: float = 1.5
+    tp_atr_mult: float = 2.5
+    min_lot: float = 0.01
+    max_lot: float = 0.05
 
 
 def ema(values: list[float], period: int) -> float:
@@ -91,9 +100,13 @@ def sync_live_price(cfg: AutoConfig) -> bool:
         return False
     try:
         account = fetch_account(ProConfig(api_url=cfg.api_url))
-        balance = float(account.get("balance", 28.43))
-    except urllib.error.URLError:
-        balance = 28.43
+        balance = float(account.get("balance", 0))
+    except urllib.error.URLError as exc:
+        # Go API unreachable — don't push a fabricated balance over the real
+        # one. 0 is a no-op sentinel: Go's SyncQuote only overwrites balance
+        # when it's > 0.
+        log.warning("Account fetch failed, syncing price only (no balance): %s", exc)
+        balance = 0
     payload = {
         "symbol": "XAUUSD",
         "bid": q["bid"],
@@ -205,9 +218,16 @@ def get_open_positions(cfg: AutoConfig) -> list[dict[str, Any]]:
 
 
 def close_position(cfg: AutoConfig, pos_id: str) -> None:
+    from gold_pro_strategy import go_api_token
+
+    headers = {}
+    token = go_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         f"{cfg.api_url}/api/v1/positions/{pos_id}",
         method="DELETE",
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -247,7 +267,15 @@ def run_cycle(cfg: AutoConfig, bb_strategy: BollingerRSIStrategy) -> str:
         indicators.update(regime_meta)
 
     risk = http_json("GET", f"{cfg.api_url}/api/v1/risk/status")
+    try:
+        control = http_json("GET", f"{cfg.api_url}/api/v1/control/status")
+    except urllib.error.URLError:
+        control = None  # older trader binary without the control gate — don't block on it
     positions = get_open_positions(cfg)
+
+    risk_allowed = risk.get("trading_allowed") if isinstance(risk, dict) else True
+    control_enabled = control.get("enabled", True) if isinstance(control, dict) else True
+    trading_allowed = bool(risk_allowed) and bool(control_enabled)
 
     snap = {
         "time": datetime.now(timezone.utc).isoformat(),
@@ -258,16 +286,17 @@ def run_cycle(cfg: AutoConfig, bb_strategy: BollingerRSIStrategy) -> str:
         "confidence": round(confidence, 3),
         "balance": account.get("balance"),
         "open_positions": len(positions),
-        "trading_allowed": risk.get("trading_allowed") if isinstance(risk, dict) else True,
+        "trading_allowed": trading_allowed,
+        "control_enabled": control_enabled,
         **{k: indicators.get(k) for k in ("rsi", "adx", "ema_fast", "ema_slow", "bb_lower", "bb_upper", "strategy", "reason", "signal")},
     }
     log_analysis(snap)
 
     log.info(
-        "mid=%.2f regime=%s signal=%s conf=%.2f rsi=%s adx=%s pos=%d allowed=%s",
+        "mid=%.2f regime=%s signal=%s conf=%.2f rsi=%s adx=%s pos=%d allowed=%s control=%s",
         mid, regime, action, confidence,
         indicators.get("rsi", "?"), indicators.get("adx", "?"),
-        len(positions), snap.get("trading_allowed"),
+        len(positions), trading_allowed, control_enabled,
     )
 
     # Auto-exit: close if unrealized loss > 5% margin (Go monitor handles SL/TP too)
@@ -279,17 +308,54 @@ def run_cycle(cfg: AutoConfig, bb_strategy: BollingerRSIStrategy) -> str:
             close_position(cfg, pos["id"])
             return "exit"
 
-    if not isinstance(risk, dict) or not risk.get("trading_allowed", True):
+    if not control_enabled:
+        return "control_disabled"
+
+    if not trading_allowed:
         return "blocked"
 
     if len(positions) >= 3:
         return "max_positions"
 
     if action in ("buy", "sell") and confidence >= cfg.min_confidence:
+        now = time.time()
+        if now - cfg.last_trade_at < cfg.trade_cooldown_sec:
+            log.info("Cooldown active (%.0fs left)", cfg.trade_cooldown_sec - (now - cfg.last_trade_at))
+            return "cooldown"
+
         entry = ask if action == "buy" else bid
-        equity = float(account.get("equity", 28.43))
-        sl, tp = calc_sl_tp(action, entry, equity, cfg.lot_size)
+        equity = float(account.get("equity", 0)) or float(account.get("balance", 0))
+
+        # ATR-based SL/TP: distance scales with gold's actual recent
+        # volatility instead of a fixed dollar amount. A fixed-equity-%
+        # distance (the old calc_sl_tp) produced stops far tighter than
+        # gold's real hourly movement — a real backtest showed a 2.7% win
+        # rate and -84% return because nearly every trade got stopped out
+        # within the hour regardless of direction. Lot size, not stop
+        # distance, is what flexes to keep risk within budget.
+        atr_val = atr(highs, lows, closes, 14)
+        sl, tp = calc_sl_tp_atr(action, entry, atr_val, cfg.sl_atr_mult, cfg.tp_atr_mult)
+        sl_dist = abs(entry - sl)
+        lot = size_lot_for_risk(sl_dist, equity, cfg.max_loss_pct, cfg.min_lot, cfg.max_lot) if equity > 0 else cfg.min_lot
+
         order = send_signal(ProConfig(api_url=cfg.api_url), action, confidence)
+
+        # Mirror to the practice web terminal in-process (no queue — see
+        # exness_executor.py for why the old file-queue design silently
+        # dropped orders).
+        if cfg.mirror_exness:
+            try:
+                from exness_executor import mirror_order, TradingDisabled
+                result = mirror_order(action, sl, tp, lot, source="auto_trader")
+                log.info("Mirror order result: %s %s sl=%.2f tp=%.2f -> %s", action, lot, sl, tp, result)
+            except TradingDisabled as exc:
+                log.info("Mirror skipped — trading disabled: %s", exc)
+            except Exception as exc:
+                log.warning("Mirror order failed: %s", exc)
+
+        cfg.last_trade_at = now
+        indicators["atr"] = round(atr_val, 3)
+        indicators["lot"] = lot
         record = TradeRecord(
             timestamp=datetime.now(timezone.utc).isoformat(),
             symbol="XAUUSD",
@@ -303,7 +369,7 @@ def run_cycle(cfg: AutoConfig, bb_strategy: BollingerRSIStrategy) -> str:
             account=account if isinstance(account, dict) else {},
         )
         append_trade(record)
-        log.info("TRADE %s @ %.2f sl=%.2f tp=%.2f id=%s", action.upper(), entry, sl, tp, order.get("id", "?"))
+        log.info("TRADE %s @ %.2f sl=%.2f tp=%.2f lot=%.2f atr=%.2f id=%s", action.upper(), entry, sl, tp, lot, atr_val, order.get("id", "?"))
         return action
 
     return "hold"

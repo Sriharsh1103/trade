@@ -1,26 +1,36 @@
-# MT5 Bridge + Trading Core
+# MT5 Bridge + Trading Core — optional, experimental.
 #
-# Start this when Exness credentials are available.
-# The MT5 bridge container runs MetaTrader 5 under Wine with a REST API.
+# The primary supported path (scripts/run_auto.sh) runs the Go binary
+# directly on the host and mirrors orders via browser automation
+# (strategy/exness_executor.py) — it does NOT need this compose file or
+# Docker at all. Only use this if you're setting up the MT5 REST bridge
+# (`mode: live` in config.yaml), which is still a stub broker client
+# (backend/internal/broker/broker.go PlaceOrder is not yet implemented).
 #
-# Usage:
-#   1. Copy .env.example to .env and fill in credentials
-#   2. docker compose -f docker/docker-compose.yml up -d
-#   3. Register account via bridge API
-#   4. Set broker.account_id in config/config.yaml
-#   5. Change mode: live in config (only after demo validation)
+# Both services are opt-in via compose profiles — `up -d` with no --profile
+# flag starts nothing:
+# 1. Fill docker/.env and config/credentials.yaml
+# 2. docker compose -f docker/docker-compose.yml --profile mt5 --profile core up -d
+# 3. Register account on bridge, set account_id in config
+# 4. Or run the trader on the host instead of in Docker:
+#    ./bin/trader --config config/config.yaml
 
 services:
-  # MT5 bridge — uncomment and configure when credentials are ready
-  # mt5-bridge:
-  #   image: ghcr.io/essamamdani/xm-exness-mt5-linux:latest
-  #   ports:
-  #     - "8000:8000"
-  #   environment:
-  #     - API_TOKEN=${MT5_API_TOKEN}
-  #   volumes:
-  #     - mt5-data:/data
-  #   restart: unless-stopped
+  mt5-bridge:
+    # Community Wine+MT5 REST image (verify image availability on your machine)
+    image: gnh1201/pywine-mt5:latest
+    profiles: ["mt5"]
+    ports:
+      - "8000:8000"
+    environment:
+      - MT5_LOGIN=${EXNESS_LOGIN}
+      - MT5_PASSWORD=${EXNESS_PASSWORD}
+      - MT5_SERVER=${EXNESS_SERVER:-Exness-MT5Trial}
+      - API_TOKEN=${MT5_API_TOKEN:-change-me-secure-token}
+    volumes:
+      - mt5-data:/data
+    restart: unless-stopped
+    shm_size: "1gb"
 
   trader:
     build:
@@ -33,8 +43,7 @@ services:
     environment:
       - TZ=UTC
     restart: unless-stopped
-    # depends_on:
-    #   - mt5-bridge
+    profiles: ["core"]
 
-# volumes:
-#   mt5-data:
+volumes:
+  mt5-data:
